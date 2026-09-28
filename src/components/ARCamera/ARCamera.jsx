@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { initHandTracker, detectForVideo, disposeHandTracker, resolveHandedness, FINGER_LANDMARKS } from '../../ar/handTracker';
-import { estimateHandNailRects, NAIL_FIT } from '../../ar/nailGeometry';
-import { createSmoother } from '../../ar/coordinateSmoothing';
+import { estimateHandNailRects, handSizePx, buildNailContour, NAIL_FIT } from '../../ar/nailGeometry';
+import { createSmoother, interpolateRect } from '../../ar/coordinateSmoothing';
 import { drawNailDesign } from '../../ar/nailRenderer';
 import { mapLandmarksToCover } from '../../ar/videoMapping';
 
 const DETECTION_INTERVAL_MS = 55;
 const HAND_LOST_GRACE_MS = 350;
+const DISPLAY_TAU_MS = 45;
+const DEBUG_INTERVAL_MS = 250;
 
 export default function ARCamera({ design, preferredHand }) {
   const trackedHand = preferredHand || design?.hand || 'right';
@@ -15,15 +17,22 @@ export default function ARCamera({ design, preferredHand }) {
   const viewportRef = useRef(null);
   const streamRef = useRef(null);
   const rafRef = useRef(null);
-  const smootherRef = useRef(createSmoother({ minCutoff: 1.2, beta: 0.4, dCutoff: 1.0 }));
+  const smootherRef = useRef(createSmoother({ minCutoff: 1.0, beta: 5, dCutoff: 1.0 }));
   const facingModeRef = useRef('environment');
   const landmarksRef = useRef([]);
   const handednessRef = useRef([]);
   const lastDetectionAtRef = useRef(0);
   const lastVideoTimeRef = useRef(-1);
   const lastHandCenterRef = useRef(null);
-  const lastRectsRef = useRef(null);
   const handLostAtRef = useRef(0);
+  const designRef = useRef(design);
+  const trackedHandRef = useRef(trackedHand);
+  const lastTimestampRef = useRef(0);
+  const targetRectsRef = useRef(null);
+  const displayRectsRef = useRef({});
+  const mappedLandmarksRef = useRef(null);
+  const lastFrameAtRef = useRef(0);
+  const lastDebugAtRef = useRef(0);
 
   const [status, setStatus] = useState('idle');
   const [facingMode, setFacingMode] = useState('environment');
@@ -46,6 +55,8 @@ export default function ARCamera({ design, preferredHand }) {
     + '&tlen=' + fit.thumbLength.toFixed(2) + '&twid=' + fit.thumbWidth.toFixed(2);
 
   useEffect(() => { manualAdjustRef.current = manualAdjust; }, [manualAdjust]);
+  useEffect(() => { designRef.current = design; }, [design]);
+  useEffect(() => { trackedHandRef.current = trackedHand; }, [trackedHand]);
   useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
 
   const stopCamera = useCallback((disposeTracker = true) => {
@@ -56,6 +67,11 @@ export default function ARCamera({ design, preferredHand }) {
     lastDetectionAtRef.current = 0;
     lastVideoTimeRef.current = -1;
     smootherRef.current.reset();
+    targetRectsRef.current = null;
+    displayRectsRef.current = {};
+    mappedLandmarksRef.current = null;
+    lastHandCenterRef.current = null;
+    handLostAtRef.current = 0;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -141,6 +157,104 @@ export default function ARCamera({ design, preferredHand }) {
     }
   }, [getVideoDevices, stopCamera]);
 
+  function resetTracking() {
+    smootherRef.current.reset();
+    targetRectsRef.current = null;
+    displayRectsRef.current = {};
+    mappedLandmarksRef.current = null;
+    lastHandCenterRef.current = null;
+    handLostAtRef.current = 0;
+  }
+
+  function pushDebug(info, now) {
+    if (now - lastDebugAtRef.current < DEBUG_INTERVAL_MS) return;
+    lastDebugAtRef.current = now;
+    setDebugInfo(info);
+  }
+
+  // Se ejecuta SOLO cuando hay una detección nueva: elige la mano del diseño,
+  // estima las uñas y las filtra con el timestamp real de la detección.
+  function processDetection(video, canvas, ts) {
+    const activeDesign = designRef.current;
+    const hands = landmarksRef.current;
+    const handednessResults = handednessRef.current;
+    const isFrontCamera = facingModeRef.current === 'user';
+    let chosenIndex = -1;
+    for (let i = 0; i < hands.length; i += 1) {
+      const label = handednessResults[i]?.[0]?.categoryName;
+      const resolved = label ? resolveHandedness(label, isFrontCamera) : null;
+      if (resolved === trackedHandRef.current) { chosenIndex = i; break; }
+    }
+    if (chosenIndex < 0 && hands.length && lastHandCenterRef.current) {
+      let bestDistance = Infinity;
+      hands.forEach((hand, index) => {
+        const wrist = hand?.[0];
+        if (!wrist) return;
+        const distance = Math.hypot(wrist.x - lastHandCenterRef.current.x, wrist.y - lastHandCenterRef.current.y);
+        if (distance < bestDistance) { bestDistance = distance; chosenIndex = index; }
+      });
+    }
+    if (chosenIndex < 0 && hands.length) chosenIndex = 0;
+    const landmarks = chosenIndex >= 0 ? hands[chosenIndex] : null;
+
+    if (!landmarks) {
+      if (!handLostAtRef.current) handLostAtRef.current = ts;
+      if (debugEnabled) pushDebug({ hands: hands.length, chosen: chosenIndex, rects: 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height }, ts);
+      return;
+    }
+
+    // El vídeo usa object-fit: cover: mapeamos las coordenadas normalizadas de
+    // MediaPipe al área visible del canvas.
+    const mapped = mapLandmarksToCover(landmarks, video.videoWidth, video.videoHeight, canvas.width, canvas.height);
+    const size = { width: canvas.width, height: canvas.height };
+    const rectsRaw = estimateHandNailRects(mapped, activeDesign, size);
+    const scale = handSizePx(mapped, size);
+    handLostAtRef.current = 0;
+    if (mapped[0]) lastHandCenterRef.current = { x: mapped[0].x, y: mapped[0].y };
+    mappedLandmarksRef.current = mapped;
+
+    const targets = {};
+    for (const nail of activeDesign.nails) {
+      const smoothed = smootherRef.current.smooth(nail.finger, rectsRaw[nail.finger], ts, {
+        scale,
+        rebuild: (r) => buildNailContour(nail.shape, r.width, r.height, nail.finger),
+      });
+      if (smoothed) targets[nail.finger] = smoothed;
+    }
+    targetRectsRef.current = targets;
+
+    if (debugEnabled) {
+      pushDebug({
+        hands: hands.length,
+        chosen: chosenIndex,
+        rects: Object.keys(targets).length,
+        video: video.videoWidth + 'x' + video.videoHeight,
+        canvas: canvas.width + 'x' + canvas.height,
+      }, ts);
+    }
+  }
+
+  function drawDebugLandmarks(ctx, canvas) {
+    const mapped = mappedLandmarksRef.current;
+    if (!mapped) return;
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,0,0,.85)';
+    for (const point of mapped) {
+      ctx.beginPath(); ctx.arc(point.x * canvas.width, point.y * canvas.height, 3, 0, Math.PI * 2); ctx.fill();
+    }
+    // DIP en azul y punta (TIP) en amarillo: sirven para ver si el desajuste
+    // viene de los landmarks o de las constantes de nailGeometry.js.
+    for (const finger of Object.values(FINGER_LANDMARKS)) {
+      for (const [index, color] of [[finger.dip, '#00aaff'], [finger.tip, '#ffe600']]) {
+        const point = mapped[index];
+        if (!point) continue;
+        ctx.fillStyle = color;
+        ctx.beginPath(); ctx.arc(point.x * canvas.width, point.y * canvas.height, 5, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
   function renderLoop() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -149,19 +263,24 @@ export default function ARCamera({ design, preferredHand }) {
 
     function tick(now) {
       if (video.readyState >= 2) {
+        let detectedThisFrame = false;
         if (
           now - lastDetectionAtRef.current >= DETECTION_INTERVAL_MS
           && video.currentTime !== lastVideoTimeRef.current
         ) {
           try {
-            const videoTimeMs = video.currentTime * 1000;
-            const result = detectForVideo(video, videoTimeMs);
+            // MediaPipe exige timestamps estrictamente crecientes. video.currentTime
+            // vuelve a 0 al cambiar de cámara (nuevo MediaStream) y rompía la
+            // detección; performance.now() es monótono, y se fuerza +1 ms por si acaso.
+            const ts = Math.max(now, lastTimestampRef.current + 1);
+            lastTimestampRef.current = ts;
+            const result = detectForVideo(video, ts);
             landmarksRef.current = result.landmarks || [];
             handednessRef.current = result.handedness || result.handednesses || [];
             lastVideoTimeRef.current = video.currentTime;
             lastDetectionAtRef.current = now;
-            if (!landmarksRef.current.length) setStatus('no-hand');
-            else setStatus('running');
+            detectedThisFrame = true;
+            setStatus(landmarksRef.current.length ? 'running' : 'no-hand');
           } catch (detectionError) {
             console.error('Error detectando la mano:', detectionError);
             lastDetectionAtRef.current = now;
@@ -169,112 +288,32 @@ export default function ARCamera({ design, preferredHand }) {
         }
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (detectedThisFrame) processDetection(video, canvas, now);
 
-        // BUG PRINCIPAL DE ALINEACIÓN: con numHands=2, antes se iteraba con
-        // .forEach sobre TODAS las manos detectadas y se aplicaba el mismo
-        // diseño a cada una, pero el suavizador One-Euro (coordinateSmoothing.js)
-        // solo indexa su estado por nombre de dedo ('thumb', 'index'...), no
-        // por mano. Si aparecía una segunda mano (real o un falso positivo
-        // momentáneo de MediaPipe en el fondo), su posición sobrescribía cada
-        // frame el mismo estado del filtro que la mano correcta, haciendo que
-        // las uñas saltasen o quedasen desplazadas de la uña real.
-        // El diseño (design.hand) siempre está pensado para UNA sola mano, así
-        // que ahora seleccionamos, de entre las manos detectadas, la que
-        // corresponde a esa mano (usando la handedness que ya devuelve
-        // MediaPipe, corregida por espejo si la cámara es frontal) y solo esa
-        // se rastrea y suaviza. Si ninguna coincide (fallo de clasificación),
-        // usamos la primera mano detectada como fallback en vez de mezclar
-        // varias.
-        const hands = landmarksRef.current;
-        const handednessResults = handednessRef.current;
-        const isFrontCamera = facingModeRef.current === 'user';
-        let chosenIndex = -1;
-        for (let i = 0; i < hands.length; i += 1) {
-          const label = handednessResults[i]?.[0]?.categoryName;
-          const resolved = label ? resolveHandedness(label, isFrontCamera) : null;
-          if (resolved === trackedHand) { chosenIndex = i; break; }
-        }
-        if (chosenIndex < 0 && hands.length && lastHandCenterRef.current) {
-          let bestDistance = Infinity;
-          hands.forEach((hand, index) => {
-            const wrist = hand?.[0];
-            if (!wrist) return;
-            const distance = Math.hypot(wrist.x - lastHandCenterRef.current.x, wrist.y - lastHandCenterRef.current.y);
-            if (distance < bestDistance) { bestDistance = distance; chosenIndex = index; }
-          });
-        }
-        if (chosenIndex < 0 && hands.length) chosenIndex = 0;
-        const landmarks = chosenIndex >= 0 ? hands[chosenIndex] : null;
-
-        if (landmarks) {
-          // El vídeo usa object-fit: cover dentro de un viewport 3:4, por lo
-          // que las coordenadas normalizadas de MediaPipe no coinciden con
-          // el canvas original. Las mapeamos al área visible.
-          const mappedLandmarks = mapLandmarksToCover(
-            landmarks,
-            video.videoWidth,
-            video.videoHeight,
-            canvas.width,
-            canvas.height,
-          );
-          const rectsRaw = estimateHandNailRects(mappedLandmarks, design, {
-            width: canvas.width,
-            height: canvas.height
-          });
-          lastRectsRef.current = rectsRaw;
-          handLostAtRef.current = 0;
-          const wrist = mappedLandmarks?.[0];
-          if (wrist) lastHandCenterRef.current = { x: wrist.x, y: wrist.y };
-
-          if (debugEnabled) {
-            setDebugInfo({
-              hands: hands.length,
-              chosen: chosenIndex,
-              rects: Object.values(rectsRaw || {}).filter(Boolean).length,
-              video: video.videoWidth + 'x' + video.videoHeight,
-              canvas: canvas.width + 'x' + canvas.height,
-            });
-            ctx.save();
-            ctx.fillStyle = 'rgba(255,0,0,.85)';
-            for (const point of mappedLandmarks) {
-              ctx.beginPath(); ctx.arc(point.x * canvas.width, point.y * canvas.height, 3, 0, Math.PI * 2); ctx.fill();
-            }
-            // DIP en azul y punta (TIP) en amarillo: sirven para ver si el desajuste
-            // viene de los landmarks o de las constantes de nailGeometry.js.
-            for (const finger of Object.values(FINGER_LANDMARKS)) {
-              for (const [index, color] of [[finger.dip, '#00aaff'], [finger.tip, '#ffe600']]) {
-                const point = mappedLandmarks[index];
-                if (!point) continue;
-                ctx.fillStyle = color;
-                ctx.beginPath(); ctx.arc(point.x * canvas.width, point.y * canvas.height, 5, 0, Math.PI * 2); ctx.fill();
-              }
-            }
-            ctx.restore();
-          }
-
-          for (const nail of design.nails) {
-            const smoothed = smootherRef.current.smooth(nail.finger, rectsRaw[nail.finger], now);
-            if (!smoothed) continue;
-            const adjusted = applyManualAdjust(smoothed, manualAdjustRef.current, canvas);
+        const targets = targetRectsRef.current;
+        const lostAt = handLostAtRef.current;
+        if (targets && lostAt && now - lostAt >= HAND_LOST_GRACE_MS) {
+          resetTracking();
+        } else if (targets) {
+          const dt = lastFrameAtRef.current ? now - lastFrameAtRef.current : 16;
+          const alpha = 1 - Math.exp(-dt / DISPLAY_TAU_MS);
+          const activeDesign = designRef.current;
+          for (const nail of activeDesign.nails) {
+            const target = targets[nail.finger];
+            if (!target) continue;
+            const shown = interpolateRect(
+              displayRectsRef.current[nail.finger],
+              target,
+              alpha,
+              (r) => buildNailContour(nail.shape, r.width, r.height, nail.finger),
+            );
+            displayRectsRef.current[nail.finger] = shown;
+            const adjusted = applyManualAdjust(shown, manualAdjustRef.current, canvas);
             drawNailDesign(ctx, adjusted, nail, manualAdjustRef.current.opacity);
           }
-        } else {
-          if (!handLostAtRef.current) handLostAtRef.current = now;
-          const withinGrace = lastRectsRef.current && (now - handLostAtRef.current) < HAND_LOST_GRACE_MS;
-          if (withinGrace) {
-            for (const nail of design.nails) {
-              const smoothed = smootherRef.current.smooth(nail.finger, lastRectsRef.current[nail.finger], now);
-              if (!smoothed) continue;
-              const adjusted = applyManualAdjust(smoothed, manualAdjustRef.current, canvas);
-              drawNailDesign(ctx, adjusted, nail, manualAdjustRef.current.opacity);
-            }
-          } else {
-            lastHandCenterRef.current = null;
-            lastRectsRef.current = null;
-            for (const nail of design.nails) smootherRef.current.smooth(nail.finger, null, now);
-          }
-          if (debugEnabled) setDebugInfo({ hands: hands.length, chosen: chosenIndex, rects: withinGrace ? Object.values(lastRectsRef.current || {}).filter(Boolean).length : 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height });
         }
+        if (debugEnabled) drawDebugLandmarks(ctx, canvas);
+        lastFrameAtRef.current = now;
       }
       rafRef.current = requestAnimationFrame(tick);
     }
@@ -340,7 +379,7 @@ export default function ARCamera({ design, preferredHand }) {
         {status === 'no-hand' && <div className="ar-hint">Acerca la mano a la cámara.</div>}
         {status === 'loading' && <div className="ar-hint">Preparando cámara…</div>}
         {status === 'error' && <div className="ar-hint ar-hint--error">{errorMsg}</div>}
-        {debugEnabled && <div style={{position:'absolute',zIndex:10,left:8,top:8,padding:'6px 8px',background:'rgba(0,0,0,.72)',color:'#fff',font:'12px monospace',borderRadius:6,pointerEvents:'none'}}>AR debug ? manos {debugInfo.hands} ? elegida {debugInfo.chosen} ? u?as {debugInfo.rects}<br/>{debugInfo.video} ? {debugInfo.canvas}</div>}
+        {debugEnabled && <div style={{position:'absolute',zIndex:10,left:8,top:8,padding:'6px 8px',background:'rgba(0,0,0,.72)',color:'#fff',font:'12px monospace',borderRadius:6,pointerEvents:'none'}}>AR debug · manos {debugInfo.hands} · elegida {debugInfo.chosen} · uñas {debugInfo.rects}<br/>{debugInfo.video} · {debugInfo.canvas}</div>}
 
         {status !== 'idle' && status !== 'error' && (
           <div className="ar-live-adjust">
