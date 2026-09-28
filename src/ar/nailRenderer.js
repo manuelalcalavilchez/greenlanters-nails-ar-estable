@@ -1,9 +1,9 @@
 import { drawSvgNailDesign } from './svgDesignRenderer';
 
 // nailRenderer.js
-// Dibuja el diseÃ±o de cada uÃ±a sobre un canvas 2D, en la posiciÃ³n/rotaciÃ³n
+// Dibuja el diseño de cada uña sobre un canvas 2D, en la posición/rotación
 // dada por nailGeometry.js. Los patrones y adornos se renderizan en el
-// espacio local de cada uÃ±a para acompaÃ±ar el seguimiento de la mano.
+// espacio local de cada uña para acompañar el seguimiento de la mano.
 
 function applyNailPath(ctx, rect) {
   if (rect.contour?.baseLeft) {

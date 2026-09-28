@@ -34,7 +34,7 @@ body {
 .page { padding: 16px; max-width: 720px; margin: 0 auto; }
 
 button {
-  min-height: 44px; /* objetivo tÃ¡ctil accesible en mÃ³vil */
+  min-height: 44px; /* objetivo táctil accesible en móvil */
   padding: 10px 16px;
   border-radius: var(--radius);
   border: 1px solid #E5C9D3;
