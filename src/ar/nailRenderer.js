@@ -5,7 +5,7 @@ import { drawSvgNailDesign } from './svgDesignRenderer';
 // dada por nailGeometry.js. Los patrones y adornos se renderizan en el
 // espacio local de cada uña para acompañar el seguimiento de la mano.
 
-function applyNailPath(ctx, rect) {
+export function applyNailPath(ctx, rect) {
   if (rect.contour?.baseLeft) {
     const c = rect.contour;
     ctx.beginPath();
@@ -22,11 +22,14 @@ function applyNailPath(ctx, rect) {
       c.baseRight.x,
       c.baseRight.y,
     );
+    // Se recorre de la base a la punta: el primer control es el cercano a la base
+    // (rightControl2) y el segundo el cercano a la punta (rightControl1). Con el
+    // orden invertido el borde derecho salía deformado y la uña, asimétrica.
     ctx.bezierCurveTo(
-      c.rightControl1.x,
-      c.rightControl1.y,
       c.rightControl2.x,
       c.rightControl2.y,
+      c.rightControl1.x,
+      c.rightControl1.y,
       c.tipRight.x,
       c.tipRight.y,
     );
