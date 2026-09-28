@@ -49,11 +49,25 @@ const SHAPE_ANCHORS = {
   stiletto: { base: 0.64, tip: 0.08, tipWidth: 0.04, shoulder: 0.72 },
 };
 
-function getFingerWidth(landmarks, fingerId, canvasSize, proximalLen, distalLen) {
+// Tamaño de la mano en px (muñeca -> MCP del corazón). Sirve de escala para los
+// mínimos y para normalizar el filtrado, en vez de píxeles absolutos que
+// dominaban al alejar la mano.
+export function handSizePx(landmarks, canvasSize) {
+  const wrist = landmarks?.[0];
+  const middleMcp = landmarks?.[9];
+  if (!wrist || !middleMcp) return 200;
+  return Math.max(1, distancePx(pxPoint(wrist, canvasSize), pxPoint(middleMcp, canvasSize)));
+}
+
+export function buildNailContour(shapeId, width, length, fingerId) {
+  return buildContour(getShapeById(shapeId), width, length, fingerId);
+}
+
+function getFingerWidth(landmarks, fingerId, canvasSize, proximalLen, distalLen, handSize) {
   const p = landmarks.map((point) => pxPoint(point, canvasSize));
 
   if (fingerId === 'thumb') {
-    return Math.max(17, distalLen * 0.88, proximalLen * 0.64);
+    return Math.max(handSize * 0.068, distalLen * 0.88, proximalLen * 0.64);
   }
 
   const distalNeighbors = {
@@ -75,7 +89,7 @@ function getFingerWidth(landmarks, fingerId, canvasSize, proximalLen, distalLen)
   const pair = distalNeighbors[fingerId];
   const neighborSpan = pair?.[0] && pair?.[1] ? distancePx(pair[0], pair[1]) : 0;
   const neighborWidth = neighborSpan * (fingerId === 'pinky' ? 0.30 : 0.27);
-  return Math.max(14, distalLen * distalWidthRatio, neighborWidth);
+  return Math.max(handSize * 0.056, distalLen * distalWidthRatio, neighborWidth);
 }
 
 function buildContour(shape, width, length, fingerId) {
@@ -116,20 +130,26 @@ export function estimateNailRect(landmarks, fingerId, shapeId, canvasSize) {
   const tipPx = pxPoint(tip, canvasSize);
   const mcpPx = pxPoint(mcp, canvasSize);
 
-  const axis = normalize(tipPx.x - dipPx.x, tipPx.y - dipPx.y);
+  const handSize = handSizePx(landmarks, canvasSize);
   const proximalLen = distancePx(mcpPx, pipPx);
   const distalLen = distancePx(dipPx, tipPx);
+  // Con el dedo apuntando a la cámara DIP y TIP casi coinciden en 2D y el eje
+  // sale casi aleatorio: en ese caso se usa PIP->TIP, mucho más estable.
+  const axis = distalLen < handSize * 0.05
+    ? normalize(tipPx.x - pipPx.x, tipPx.y - pipPx.y)
+    : normalize(tipPx.x - dipPx.x, tipPx.y - dipPx.y);
   const fingerWidthPx = getFingerWidth(
     landmarks,
     fingerId,
     canvasSize,
     proximalLen,
     distalLen,
+    handSize,
   ) * NAIL_FIT.width * (fingerId === 'thumb' ? NAIL_FIT.thumbWidth : 1);
 
   const shape = getShapeById(shapeId);
   const nailLength = Math.max(
-    16,
+    handSize * 0.064,
     Math.min(
       fingerWidthPx * shape.aspect,
       distalLen * (shape.id === 'stiletto' || shape.id === 'almond' ? 0.97 : 0.94),
@@ -138,7 +158,7 @@ export function estimateNailRect(landmarks, fingerId, shapeId, canvasSize) {
 
   // La base queda prácticamente pegada al DIP, dejando solo un margen
   // pequeño para evitar que la máscara se meta en la articulación.
-  const baseOffset = Math.max(1.2, distalLen * 0.025);
+  const baseOffset = Math.max(handSize * 0.005, distalLen * 0.025);
   const centerAlongAxis = baseOffset + nailLength / 2 + distalLen * NAIL_FIT.shift;
   const center = {
     x: dipPx.x + axis.x * centerAlongAxis,
