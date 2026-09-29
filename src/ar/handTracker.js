@@ -35,6 +35,15 @@ export const FINGER_LANDMARKS = {
   pinky: { mcp: 17, pip: 18, dip: 19, tip: 20 },
 };
 
+export const DEFAULT_CONFIDENCE = 0.6;
+
+export function readConfidence(search = typeof window !== 'undefined' && window.location ? window.location.search : '') {
+  const raw = new URLSearchParams(search).get('conf');
+  const value = raw === null ? NaN : Number(raw);
+  if (!Number.isFinite(value)) return DEFAULT_CONFIDENCE;
+  return Math.min(0.9, Math.max(0.3, value));
+}
+
 export async function initHandTracker({
   // CDN oficial de Google para los assets WASM del runtime. Si prefieres
   // servir esto tú mismo (recomendado en producción para no depender de un
@@ -48,13 +57,16 @@ export async function initHandTracker({
   if (handLandmarkerInstance) return handLandmarkerInstance;
 
   const vision = await FilesetResolver.forVisionTasks(wasmBaseUrl);
+  const confidence = readConfidence();
   const options = {
     baseOptions: { modelAssetPath: modelUrl, delegate: 'GPU' },
     runningMode,
     numHands,
-    minHandDetectionConfidence: 0.45,
-    minHandPresenceConfidence: 0.45,
-    minTrackingConfidence: 0.45,
+    // Umbrales más altos que antes (0.45) para reducir manos fantasma. Se pueden
+    // ajustar sin redesplegar con ?conf=0.5 (rango 0.3-0.9) para probar en el móvil.
+    minHandDetectionConfidence: confidence,
+    minHandPresenceConfidence: confidence,
+    minTrackingConfidence: Math.max(0.3, confidence - 0.1),
   };
 
   try {

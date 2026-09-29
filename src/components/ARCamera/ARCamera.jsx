@@ -4,6 +4,7 @@ import { estimateHandNailRects, handSizePx, buildNailContour, NAIL_FIT } from '.
 import { createSmoother, interpolateRect } from '../../ar/coordinateSmoothing';
 import { drawNailDesign } from '../../ar/nailRenderer';
 import { mapLandmarksToCover } from '../../ar/videoMapping';
+import { isPlausibleHand, createHandGate } from '../../ar/handGate';
 
 const DETECTION_INTERVAL_MS = 55;
 const HAND_LOST_GRACE_MS = 350;
@@ -33,6 +34,7 @@ export default function ARCamera({ design, preferredHand }) {
   const mappedLandmarksRef = useRef(null);
   const lastFrameAtRef = useRef(0);
   const lastDebugAtRef = useRef(0);
+  const handGateRef = useRef(createHandGate());
 
   const [status, setStatus] = useState('idle');
   const [facingMode, setFacingMode] = useState('environment');
@@ -207,9 +209,24 @@ export default function ARCamera({ design, preferredHand }) {
     // MediaPipe al área visible del canvas.
     const mapped = mapLandmarksToCover(landmarks, video.videoWidth, video.videoHeight, canvas.width, canvas.height);
     const size = { width: canvas.width, height: canvas.height };
-    const rectsRaw = estimateHandNailRects(mapped, activeDesign, size);
+    // Filtro anti "mano fantasma": descarta detecciones implausibles y exige
+    // dos detecciones coherentes seguidas antes de pintar uñas.
+    if (!isPlausibleHand(mapped, size)) {
+      if (!handLostAtRef.current) handLostAtRef.current = ts;
+      if (debugEnabled) pushDebug({ hands: hands.length, chosen: chosenIndex, rects: 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height }, ts);
+      return;
+    }
     const scale = handSizePx(mapped, size);
+    const gate = handGateRef.current.update(
+      { x: mapped[0].x * size.width, y: mapped[0].y * size.height }, scale, ts,
+    );
+    if (gate.reset) resetTracking();
     handLostAtRef.current = 0;
+    if (!gate.show) {
+      if (debugEnabled) pushDebug({ hands: hands.length, chosen: chosenIndex, rects: 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height }, ts);
+      return;
+    }
+    const rectsRaw = estimateHandNailRects(mapped, activeDesign, size);
     if (mapped[0]) lastHandCenterRef.current = { x: mapped[0].x, y: mapped[0].y };
     mappedLandmarksRef.current = mapped;
 
