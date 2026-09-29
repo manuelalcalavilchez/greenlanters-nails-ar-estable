@@ -198,10 +198,14 @@ export default function ARCamera({ design, preferredHand }) {
     }
     if (chosenIndex < 0 && hands.length) chosenIndex = 0;
     const landmarks = chosenIndex >= 0 ? hands[chosenIndex] : null;
+    const rawLabel = chosenIndex >= 0 ? handednessResults[chosenIndex]?.[0]?.categoryName : null;
+    const handLabel = rawLabel
+      ? rawLabel + ' → ' + resolveHandedness(rawLabel, isFrontCamera) + ' (busca ' + trackedHandRef.current + ')'
+      : '-';
 
     if (!landmarks) {
       if (!handLostAtRef.current) handLostAtRef.current = ts;
-      if (debugEnabled) pushDebug({ hands: hands.length, chosen: chosenIndex, rects: 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height }, ts);
+      if (debugEnabled) pushDebug({ hands: hands.length, chosen: chosenIndex, handLabel, rects: 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height }, ts);
       return;
     }
 
@@ -213,7 +217,7 @@ export default function ARCamera({ design, preferredHand }) {
     // dos detecciones coherentes seguidas antes de pintar uñas.
     if (!isPlausibleHand(mapped, size)) {
       if (!handLostAtRef.current) handLostAtRef.current = ts;
-      if (debugEnabled) pushDebug({ hands: hands.length, chosen: chosenIndex, rects: 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height }, ts);
+      if (debugEnabled) pushDebug({ hands: hands.length, chosen: chosenIndex, handLabel, rects: 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height }, ts);
       return;
     }
     const scale = handSizePx(mapped, size);
@@ -222,8 +226,9 @@ export default function ARCamera({ design, preferredHand }) {
     );
     if (gate.reset) resetTracking();
     handLostAtRef.current = 0;
+    if (gate.skip) return; // detección atípica (desenfoque): se conservan las uñas anteriores
     if (!gate.show) {
-      if (debugEnabled) pushDebug({ hands: hands.length, chosen: chosenIndex, rects: 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height }, ts);
+      if (debugEnabled) pushDebug({ hands: hands.length, chosen: chosenIndex, handLabel, rects: 0, video: video.videoWidth + 'x' + video.videoHeight, canvas: canvas.width + 'x' + canvas.height }, ts);
       return;
     }
     const rectsRaw = estimateHandNailRects(mapped, activeDesign, size);
@@ -244,6 +249,7 @@ export default function ARCamera({ design, preferredHand }) {
       pushDebug({
         hands: hands.length,
         chosen: chosenIndex,
+        handLabel,
         rects: Object.keys(targets).length,
         video: video.videoWidth + 'x' + video.videoHeight,
         canvas: canvas.width + 'x' + canvas.height,
@@ -396,7 +402,7 @@ export default function ARCamera({ design, preferredHand }) {
         {status === 'no-hand' && <div className="ar-hint">Acerca la mano a la cámara.</div>}
         {status === 'loading' && <div className="ar-hint">Preparando cámara…</div>}
         {status === 'error' && <div className="ar-hint ar-hint--error">{errorMsg}</div>}
-        {debugEnabled && <div style={{position:'absolute',zIndex:10,left:8,top:8,padding:'6px 8px',background:'rgba(0,0,0,.72)',color:'#fff',font:'12px monospace',borderRadius:6,pointerEvents:'none'}}>AR debug · manos {debugInfo.hands} · elegida {debugInfo.chosen} · uñas {debugInfo.rects}<br/>{debugInfo.video} · {debugInfo.canvas}</div>}
+        {debugEnabled && <div style={{position:'absolute',zIndex:10,left:8,top:8,padding:'6px 8px',background:'rgba(0,0,0,.72)',color:'#fff',font:'12px monospace',borderRadius:6,pointerEvents:'none'}}>AR debug · manos {debugInfo.hands} · elegida {debugInfo.chosen} · uñas {debugInfo.rects}<br/>mano {debugInfo.handLabel || '-'}<br/>{debugInfo.video} · {debugInfo.canvas}</div>}
 
         {status !== 'idle' && status !== 'error' && (
           <div className="ar-live-adjust">

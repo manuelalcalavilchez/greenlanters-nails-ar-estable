@@ -37,8 +37,8 @@ describe('isPlausibleHand', () => {
 describe('createHandGate', () => {
   it('muestra la mano solo tras dos detecciones coherentes seguidas', () => {
     const gate = createHandGate();
-    expect(gate.update({ x: 200, y: 500 }, 150, 0)).toEqual({ show: false, reset: false });
-    expect(gate.update({ x: 205, y: 498 }, 150, 55)).toEqual({ show: true, reset: false });
+    expect(gate.update({ x: 200, y: 500 }, 150, 0)).toMatchObject({ show: false, reset: false });
+    expect(gate.update({ x: 205, y: 498 }, 150, 55)).toMatchObject({ show: true, reset: false });
     expect(gate.update({ x: 210, y: 495 }, 150, 110).show).toBe(true);
   });
   it('un salto imposible cuenta como mano nueva: reset y vuelve a confirmar', () => {
@@ -46,15 +46,15 @@ describe('createHandGate', () => {
     gate.update({ x: 100, y: 500 }, 150, 0);
     gate.update({ x: 105, y: 500 }, 150, 55);
     const jump = gate.update({ x: 450, y: 200 }, 150, 110); // >2 tamaños de mano en 55 ms
-    expect(jump).toEqual({ show: false, reset: true });
-    expect(gate.update({ x: 452, y: 202 }, 150, 165)).toEqual({ show: true, reset: false });
+    expect(jump).toMatchObject({ show: false, reset: true });
+    expect(gate.update({ x: 452, y: 202 }, 150, 165)).toMatchObject({ show: true, reset: false });
   });
   it('un hueco largo (mano perdida) exige confirmar de nuevo', () => {
     const gate = createHandGate();
     gate.update({ x: 100, y: 500 }, 150, 0);
     gate.update({ x: 100, y: 500 }, 150, 55);
     const back = gate.update({ x: 102, y: 500 }, 150, 1000);
-    expect(back).toEqual({ show: false, reset: true });
+    expect(back).toMatchObject({ show: false, reset: true });
   });
   it('un fantasma de un solo fotograma nunca llega a mostrarse', () => {
     const gate = createHandGate();
@@ -68,6 +68,29 @@ describe('createHandGate', () => {
     gate.update({ x: 1, y: 1 }, 100, 55);
     gate.reset();
     expect(gate.update({ x: 1, y: 1 }, 100, 110).show).toBe(false);
+  });
+});
+
+describe('createHandGate: desenfoque de movimiento', () => {
+  it('ignora un cambio brusco de tamaño de mano (landmarks colapsados)', () => {
+    const gate = createHandGate();
+    gate.update({ x: 200, y: 500 }, 150, 0);
+    gate.update({ x: 202, y: 500 }, 150, 55);
+    const blur = gate.update({ x: 204, y: 500 }, 40, 110);
+    expect(blur).toMatchObject({ skip: true, show: true, reset: false });
+  });
+  it('si el nuevo tamaño persiste, lo acepta tras dos descartes', () => {
+    const gate = createHandGate();
+    gate.update({ x: 200, y: 500 }, 150, 0);
+    gate.update({ x: 202, y: 500 }, 150, 55);
+    expect(gate.update({ x: 203, y: 500 }, 60, 110).skip).toBe(true);
+    expect(gate.update({ x: 204, y: 500 }, 60, 165).skip).toBe(true);
+    expect(gate.update({ x: 205, y: 500 }, 60, 220).skip).toBe(false);
+  });
+  it('los cambios de tamaño normales (<40%) no se descartan', () => {
+    const gate = createHandGate();
+    gate.update({ x: 200, y: 500 }, 150, 0);
+    expect(gate.update({ x: 201, y: 500 }, 190, 55).skip).toBe(false);
   });
 });
 

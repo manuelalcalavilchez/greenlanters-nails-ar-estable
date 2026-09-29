@@ -29,9 +29,16 @@ export function isPlausibleHand(landmarks, size, {
 // Puerta temporal: una mano solo se muestra tras `minFrames` detecciones seguidas
 // y coherentes. Un hueco largo o un salto imposible cuentan como mano nueva
 // (reset: hay que limpiar suavizado y uñas mostradas).
-export function createHandGate({ minFrames = 2, maxGapMs = 400, maxJumpInHands = 2 } = {}) {
+// Además descarta como atípica una detección cuyo tamaño de mano cambia más de
+// `maxSizeChange` (proporción) respecto a la anterior: con desenfoque de movimiento
+// los landmarks se colapsan y salían uñas diminutas. Se ignoran como mucho
+// `maxConsecutiveSkips` seguidas; si persiste, se acepta el cambio (mano real).
+export function createHandGate({
+  minFrames = 2, maxGapMs = 400, maxJumpInHands = 2, maxSizeChange = 0.4, maxConsecutiveSkips = 2,
+} = {}) {
   let count = 0;
-  let last = null; // { x, y, ts }
+  let skips = 0;
+  let last = null; // { x, y, ts, size }
 
   return {
     update(center, handSize, ts) {
@@ -44,12 +51,19 @@ export function createHandGate({ minFrames = 2, maxGapMs = 400, maxJumpInHands =
           reset = true;
         }
       }
-      last = { x: center.x, y: center.y, ts };
+      if (!reset && last && last.size > 0 && skips < maxConsecutiveSkips
+        && Math.abs(handSize / last.size - 1) > maxSizeChange) {
+        skips += 1;
+        return { show: count >= minFrames, reset: false, skip: true };
+      }
+      skips = 0;
+      last = { x: center.x, y: center.y, ts, size: handSize };
       count += 1;
-      return { show: count >= minFrames, reset };
+      return { show: count >= minFrames, reset, skip: false };
     },
     reset() {
       count = 0;
+      skips = 0;
       last = null;
     },
   };
