@@ -21,7 +21,8 @@ function normalize(x, y) {
 //   len:   multiplicador del largo de la uña
 //   wid:   multiplicador del ancho de la uña
 //   tlen / twid: multiplicadores extra solo para el pulgar (se suman a len / wid)
-const FIT_DEFAULTS = { shift: 0, length: 1, width: 1, thumbLength: 1, thumbWidth: 1 };
+// Valores ajustados a mano en móvil (cámara trasera) con los sliders de ?debug=1.
+const FIT_DEFAULTS = { shift: 0.68, length: 1.3, width: 1, thumbLength: 0.8, thumbWidth: 1 };
 
 function readFitOverrides() {
   if (typeof window === 'undefined' || !window.location) return {};
